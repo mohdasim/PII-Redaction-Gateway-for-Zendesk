@@ -1,10 +1,11 @@
 """Zendesk API client for updating tickets with redacted content.
 
 Handles:
+- Fetching the current authenticated user (bot identity)
 - Fetching all comments for a ticket
 - Updating ticket subject and description
 - Redacting individual comments via Zendesk Redaction API
-- Adding the "pii-redacted" tag to prevent recursive processing
+- Tag management (add/remove) for redaction state tracking
 """
 
 from __future__ import annotations
@@ -35,6 +36,37 @@ class ZendeskClient:
             "Content-Type": "application/json",
             "Accept": "application/json",
         })
+
+    def get_current_user(self) -> dict:
+        """Fetch the currently authenticated Zendesk user (the bot).
+
+        Returns:
+            Dict with user info including 'id', 'name', 'email'.
+        """
+        url = f"{self._base_url}/users/me.json"
+        response = self._session.get(url, timeout=15)
+        response.raise_for_status()
+        return response.json().get("user", {})
+
+    def add_tags(self, ticket_id: int, tags: list[str]) -> dict:
+        """Add tags to a ticket without affecting existing tags.
+
+        Uses Zendesk's PUT /tickets/{id}/tags.json which merges tags.
+        """
+        url = f"{self._base_url}/tickets/{ticket_id}/tags.json"
+        response = self._session.put(url, json={"tags": tags}, timeout=15)
+        response.raise_for_status()
+        return response.json()
+
+    def remove_tags(self, ticket_id: int, tags: list[str]) -> dict:
+        """Remove specific tags from a ticket.
+
+        Uses Zendesk's DELETE /tickets/{id}/tags.json.
+        """
+        url = f"{self._base_url}/tickets/{ticket_id}/tags.json"
+        response = self._session.delete(url, json={"tags": tags}, timeout=15)
+        response.raise_for_status()
+        return response.json()
 
     def fetch_ticket_comments(self, ticket_id: int) -> list[dict]:
         """Fetch all comments for a ticket via Zendesk API.

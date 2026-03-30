@@ -32,20 +32,35 @@ def mock_s3_client():
         yield mock_client
 
 
+def _mock_tag_endpoints(ticket_id):
+    """Register responses mocks for tag add/remove endpoints on a ticket."""
+    responses.add(
+        responses.PUT,
+        f"https://testcompany.zendesk.com/api/v2/tickets/{ticket_id}/tags.json",
+        json={"tags": ["pii-redaction-in-progress"]},
+        status=200,
+    )
+    responses.add(
+        responses.DELETE,
+        f"https://testcompany.zendesk.com/api/v2/tickets/{ticket_id}/tags.json",
+        json={"tags": []},
+        status=200,
+    )
+
+
 class TestEndToEndPipeline:
     """Full pipeline integration tests."""
 
     @responses.activate
     def test_full_redaction_flow_with_ssn(self, lambda_context, mock_s3_client):
         """Complete flow: SSN in ticket -> detected -> redacted -> audit logged."""
-        # Mock fetch comments (returns empty — no comments)
+        _mock_tag_endpoints(5001)
         responses.add(
             responses.GET,
             "https://testcompany.zendesk.com/api/v2/tickets/5001/comments.json",
             json={"comments": [], "next_page": None},
             status=200,
         )
-        # Mock ticket update
         responses.add(
             responses.PUT,
             "https://testcompany.zendesk.com/api/v2/tickets/5001.json",
@@ -75,12 +90,16 @@ class TestEndToEndPipeline:
         assert response["statusCode"] == 200
         body = json.loads(response["body"])
         assert body["status"] == "processed"
+        assert body["scan_mode"] == "full"
         assert body["total_redactions"] >= 1
 
-        # Verify Zendesk ticket update was called (find the PUT call)
-        put_calls = [c for c in responses.calls if c.request.method == "PUT"]
-        assert len(put_calls) >= 1
-        zd_request = json.loads(put_calls[-1].request.body)
+        # Verify Zendesk ticket update was called
+        ticket_put_calls = [
+            c for c in responses.calls
+            if c.request.method == "PUT" and "tickets/5001.json" in c.request.url
+        ]
+        assert len(ticket_put_calls) >= 1
+        zd_request = json.loads(ticket_put_calls[-1].request.body)
         assert "pii-redacted" in zd_request["ticket"]["additional_tags"]
 
         # Verify S3 audit log written
@@ -89,14 +108,16 @@ class TestEndToEndPipeline:
         assert "audit/" in call_kwargs["Key"]
         assert call_kwargs["ServerSideEncryption"] == "AES256"
 
-        # Verify no PII in audit
+        # Verify no PII in audit and scan_mode is recorded
         audit_body = json.loads(call_kwargs["Body"])
+        assert audit_body["scan_mode"] == "full"
         audit_str = json.dumps(audit_body)
         assert "123-45-6789" not in audit_str
 
     @responses.activate
     def test_full_flow_mixed_pii(self, lambda_context, mock_s3_client):
         """Multiple PII types in one ticket are all detected and redacted."""
+        _mock_tag_endpoints(5002)
         responses.add(
             responses.GET,
             "https://testcompany.zendesk.com/api/v2/tickets/5002/comments.json",
@@ -133,12 +154,12 @@ class TestEndToEndPipeline:
         response = lambda_handler(event, lambda_context)
 
         body = json.loads(response["body"])
-        # At minimum: email in subject + email in desc + phone + SSN
         assert body["total_redactions"] >= 2
 
     @responses.activate
     def test_clean_ticket_no_redaction(self, lambda_context, mock_s3_client):
         """Tickets with no PII pass through without modification."""
+        _mock_tag_endpoints(5003)
         responses.add(
             responses.GET,
             "https://testcompany.zendesk.com/api/v2/tickets/5003/comments.json",
@@ -171,7 +192,7 @@ class TestEndToEndPipeline:
     @responses.activate
     def test_full_flow_comment_pii_redacted(self, lambda_context, mock_s3_client):
         """PII in comments fetched from API is detected and redacted via Redaction API."""
-        # Mock fetch comments — returns a comment with SSN
+        _mock_tag_endpoints(5007)
         responses.add(
             responses.GET,
             "https://testcompany.zendesk.com/api/v2/tickets/5007/comments.json",
@@ -183,14 +204,12 @@ class TestEndToEndPipeline:
             },
             status=200,
         )
-        # Mock comment redaction
         responses.add(
             responses.PUT,
             "https://testcompany.zendesk.com/api/v2/tickets/5007/comments/9001/redact.json",
             json={"comment": {"id": 9001}},
             status=200,
         )
-        # Mock ticket update
         responses.add(
             responses.PUT,
             "https://testcompany.zendesk.com/api/v2/tickets/5007.json",
@@ -221,14 +240,13 @@ class TestEndToEndPipeline:
         body = json.loads(response["body"])
         assert body["total_redactions"] >= 1
 
-        # Verify the comment redaction API was called
         redact_calls = [c for c in responses.calls if "redact.json" in c.request.url]
         assert len(redact_calls) >= 1
         redact_body = json.loads(redact_calls[0].request.body)
         assert redact_body["text"] == "321-54-9876"
 
-    def test_recursive_prevention(self, lambda_context, mock_s3_client):
-        """Tickets already tagged as redacted are skipped immediately."""
+    def test_bot_self_update_prevention(self, lambda_context, mock_s3_client):
+        """Tickets updated by the bot itself are skipped (loop prevention)."""
         event = {
             "httpMethod": "POST",
             "path": "/webhook",
@@ -242,6 +260,7 @@ class TestEndToEndPipeline:
                     "status": "open",
                     "custom_fields": [],
                     "comments": [],
+                    "updater_id": 99999,  # matches configured bot user ID
                 }
             }),
         }
@@ -250,7 +269,7 @@ class TestEndToEndPipeline:
 
         body = json.loads(response["body"])
         assert body["status"] == "skipped"
-        assert body["reason"] == "already_redacted"
+        assert body["reason"] == "bot_self_update"
 
     def test_auth_failure(self, lambda_context, mock_s3_client):
         """Invalid API key returns 401."""
@@ -269,14 +288,13 @@ class TestEndToEndPipeline:
     @responses.activate
     def test_zendesk_api_failure_doesnt_break_pipeline(self, lambda_context, mock_s3_client):
         """Zendesk API failure is handled gracefully -- audit still written."""
-        # Mock fetch comments (succeeds)
+        _mock_tag_endpoints(5006)
         responses.add(
             responses.GET,
             "https://testcompany.zendesk.com/api/v2/tickets/5006/comments.json",
             json={"comments": [], "next_page": None},
             status=200,
         )
-        # Mock ticket update (fails)
         responses.add(
             responses.PUT,
             "https://testcompany.zendesk.com/api/v2/tickets/5006.json",
@@ -303,10 +321,78 @@ class TestEndToEndPipeline:
 
         response = lambda_handler(event, lambda_context)
 
-        # Should still return 200 (pipeline completed, Zendesk update failed gracefully)
         assert response["statusCode"] == 200
         body = json.loads(response["body"])
         assert body["total_redactions"] >= 1
 
-        # Audit log should still be written
         mock_s3_client.put_object.assert_called_once()
+
+    @responses.activate
+    def test_ticket_update_incremental_scan(self, lambda_context, mock_s3_client):
+        """Ticket update on already-redacted ticket scans only new content."""
+        _mock_tag_endpoints(5008)
+        # Mock fetch comments — returns the new comment
+        responses.add(
+            responses.GET,
+            "https://testcompany.zendesk.com/api/v2/tickets/5008/comments.json",
+            json={
+                "comments": [
+                    {"id": 8001, "body": "Original comment (already clean)", "author_id": 42},
+                    {"id": 8002, "body": "My credit card is 4532015000001234", "author_id": 42},
+                ],
+                "next_page": None,
+            },
+            status=200,
+        )
+        # Mock comment redaction for the new comment
+        responses.add(
+            responses.PUT,
+            "https://testcompany.zendesk.com/api/v2/tickets/5008/comments/8002/redact.json",
+            json={"comment": {"id": 8002}},
+            status=200,
+        )
+        # Mock ticket update
+        responses.add(
+            responses.PUT,
+            "https://testcompany.zendesk.com/api/v2/tickets/5008.json",
+            json={"ticket": {"id": 5008}},
+            status=200,
+        )
+
+        event = {
+            "httpMethod": "POST",
+            "path": "/webhook",
+            "headers": {"X-API-Key": "test-secret-key"},
+            "body": json.dumps({
+                "event_type": "ticket.updated",
+                "ticket": {
+                    "id": 5008,
+                    "subject": "Help with billing",
+                    "description": "Previously clean description.",
+                    "tags": ["pii-redacted"],
+                    "status": "open",
+                    "custom_fields": [],
+                    "comments": [],
+                    "updater_id": 42,  # NOT the bot
+                    "latest_comment": {
+                        "id": 8002,
+                        "body": "My credit card is 4532015000001234",
+                        "author_id": 42,
+                        "public": True,
+                    },
+                }
+            }),
+        }
+
+        response = lambda_handler(event, lambda_context)
+
+        assert response["statusCode"] == 200
+        body = json.loads(response["body"])
+        assert body["status"] == "processed"
+        assert body["scan_mode"] == "incremental"
+        assert body["total_redactions"] >= 1
+
+        # Verify audit log records incremental mode
+        mock_s3_client.put_object.assert_called_once()
+        audit_body = json.loads(mock_s3_client.put_object.call_args.kwargs["Body"])
+        assert audit_body["scan_mode"] == "incremental"

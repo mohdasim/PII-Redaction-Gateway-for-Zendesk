@@ -27,6 +27,7 @@ class Config(BaseSettings):
     zendesk_subdomain: str = ""
     zendesk_email: str = ""
     zendesk_api_token: SecretStr = SecretStr("")
+    zendesk_bot_user_id: int | None = None
 
     # Webhook Authentication
     webhook_secret: SecretStr = SecretStr("")

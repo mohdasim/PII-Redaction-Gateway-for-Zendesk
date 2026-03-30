@@ -30,6 +30,78 @@ class TestZendeskClientAuth:
         assert client._base_url == "https://testcompany.zendesk.com/api/v2"
 
 
+class TestZendeskClientCurrentUser:
+    """Tests for fetching the current authenticated user."""
+
+    @responses.activate
+    def test_get_current_user(self, client):
+        responses.add(
+            responses.GET,
+            "https://testcompany.zendesk.com/api/v2/users/me.json",
+            json={"user": {"id": 99999, "name": "PII Bot", "email": "bot@test.com"}},
+            status=200,
+        )
+
+        user = client.get_current_user()
+        assert user["id"] == 99999
+        assert user["name"] == "PII Bot"
+
+    @responses.activate
+    def test_get_current_user_error(self, client):
+        responses.add(
+            responses.GET,
+            "https://testcompany.zendesk.com/api/v2/users/me.json",
+            json={"error": "Unauthorized"},
+            status=401,
+        )
+
+        with pytest.raises(Exception):
+            client.get_current_user()
+
+
+class TestZendeskClientTagManagement:
+    """Tests for tag add/remove operations."""
+
+    @responses.activate
+    def test_add_tags(self, client):
+        responses.add(
+            responses.PUT,
+            "https://testcompany.zendesk.com/api/v2/tickets/100/tags.json",
+            json={"tags": ["pii-redaction-in-progress", "existing-tag"]},
+            status=200,
+        )
+
+        result = client.add_tags(100, ["pii-redaction-in-progress"])
+        assert result["tags"] == ["pii-redaction-in-progress", "existing-tag"]
+        request_body = json.loads(responses.calls[0].request.body)
+        assert request_body["tags"] == ["pii-redaction-in-progress"]
+
+    @responses.activate
+    def test_remove_tags(self, client):
+        responses.add(
+            responses.DELETE,
+            "https://testcompany.zendesk.com/api/v2/tickets/100/tags.json",
+            json={"tags": ["existing-tag"]},
+            status=200,
+        )
+
+        result = client.remove_tags(100, ["pii-redaction-in-progress"])
+        request_body = json.loads(responses.calls[0].request.body)
+        assert request_body["tags"] == ["pii-redaction-in-progress"]
+
+    @responses.activate
+    def test_add_tags_error(self, client):
+        responses.add(
+            responses.PUT,
+            "https://testcompany.zendesk.com/api/v2/tickets/100/tags.json",
+            json={"error": "Not Found"},
+            status=404,
+        )
+
+        with pytest.raises(Exception):
+            client.add_tags(100, ["test-tag"])
+
+
 class TestZendeskClientUpdateTicket:
     """Tests for ticket update operations."""
 

@@ -20,6 +20,7 @@ os.environ.setdefault("AUDIT_S3_BUCKET", "test-audit-bucket")
 os.environ.setdefault("LOG_LEVEL", "DEBUG")
 os.environ.setdefault("REDACTION_STYLE", "bracket")
 os.environ.setdefault("ENABLED_PII_TYPES", "SSN,CREDIT_CARD,EMAIL,PHONE,PASSWORD,PHI,ADDRESS,NAME,DATE_OF_BIRTH")
+os.environ.setdefault("ZENDESK_BOT_USER_ID", "99999")
 
 from src.utils.config import Config
 
@@ -36,6 +37,7 @@ def test_config():
         webhook_secret="test-secret-key",
         audit_s3_bucket="test-audit-bucket",
         log_level="DEBUG",
+        zendesk_bot_user_id=99999,
     )
 
 

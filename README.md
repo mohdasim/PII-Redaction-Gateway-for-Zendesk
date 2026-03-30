@@ -10,28 +10,37 @@ graph LR
     B -->|/webhook| C[Lambda:<br/>webhook_handler]
     C --> D{Auth Valid?}
     D -->|No| E[401 Unauthorized]
-    D -->|Yes| F{Already<br/>Redacted?}
+    D -->|Yes| F{Bot's Own<br/>Update?}
     F -->|Yes| G[200 Skipped]
-    F -->|No| H[Parse Ticket<br/>Payload]
-    H --> I[Layer 1:<br/>Regex Detection]
-    I --> J[Layer 2:<br/>LLM Detection]
-    J --> K[Merge &<br/>Deduplicate]
-    K --> L[Apply Redaction]
-    L --> M{PII Found?}
-    M -->|No| N[200 No Action]
-    M -->|Yes| O[Update Zendesk<br/>Ticket + Tag]
-    O --> P[Write Audit Log<br/>to S3]
-    P --> Q[200 Processed]
-    C -.->|Logs| R[CloudWatch]
-    C -.->|Secrets| S[Secrets Manager]
+    F -->|No| H{Already<br/>Redacted?}
+    H -->|Yes| I[Incremental Scan<br/>Latest Comment Only]
+    H -->|No| J[Full Scan<br/>All Fields + Comments]
+    I --> K[Add In-Progress Tag]
+    J --> K
+    K --> L[Layer 1:<br/>Regex Detection]
+    L --> M[Layer 2:<br/>LLM Detection]
+    M --> N[Merge &<br/>Deduplicate]
+    N --> O[Apply Redaction]
+    O --> P{PII Found?}
+    P -->|No| Q[200 No Action]
+    P -->|Yes| R[Redact Comments<br/>via Zendesk API]
+    R --> S[Update Ticket<br/>Subject/Desc + Tag]
+    S --> T[Write Audit Log<br/>to S3]
+    T --> U[Remove In-Progress Tag]
+    U --> V[200 Processed]
+    C -.->|Logs| W[CloudWatch]
+    C -.->|Secrets| X[Secrets Manager]
 ```
 
 ## Features
 
+- **Ticket Create + Update Support**: Processes both `ticket.created` and `ticket.updated` events with smart scan modes
 - **Two-Layer PII Detection**: Fast regex patterns (Layer 1) + contextual LLM analysis (Layer 2)
 - **Multi-LLM Support**: Claude (primary), OpenAI, and Gemini with automatic fallback
 - **8 PII Categories**: SSN, Credit Card (Luhn-validated), Email, Phone, Password/Credentials, PHI/Medical, Address, Names
-- **Recursive Loop Prevention**: Tickets tagged `pii-redacted` are automatically skipped
+- **Comment Redaction**: Fetches all ticket comments from Zendesk API and redacts PII via the Zendesk Redaction API
+- **Smart Scan Modes**: Full scan for new tickets, incremental scan (latest comment only) for updates to already-redacted tickets
+- **Recursive Loop Prevention**: Bot self-update detection (via user ID) + in-progress tag guard prevents infinite webhook loops
 - **Audit Trail**: JSON logs to S3, partitioned by date, with lifecycle policies — no PII stored
 - **AWS Serverless**: Lambda + API Gateway + S3 + Secrets Manager + CloudWatch
 - **Infrastructure as Code**: Full Terraform configuration with modular `.tf` files

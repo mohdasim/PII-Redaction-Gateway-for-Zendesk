@@ -125,7 +125,21 @@ curl https://xxxxx.execute-api.us-east-1.amazonaws.com/prod/health
      - **Value**: The webhook secret you generated in Step 5
 4. Click **Create webhook**
 
-## Step 8: Create Zendesk Trigger
+## Step 8: Find Your Bot User ID
+
+The gateway uses the bot's Zendesk user ID to prevent infinite webhook loops (when the bot updates a ticket, the webhook fires again — the bot ID check skips its own updates).
+
+1. In Zendesk Admin Center, go to **People** > search for the API bot user
+2. Open the user profile — the **user ID** is in the URL: `https://yourcompany.zendesk.com/agent/users/{USER_ID}`
+3. Add this to your Secrets Manager or Lambda environment variables as `ZENDESK_BOT_USER_ID`
+
+> **If you skip this step**, the gateway falls back to detecting its own internal notes via pattern matching, which is less reliable.
+
+## Step 9: Create Zendesk Triggers
+
+You need **two triggers** — one for ticket creation, one for ticket updates.
+
+### Trigger 1: Ticket Created
 
 1. In Zendesk Admin Center, go to **Objects and rules** > **Business rules** > **Triggers**
 2. Click **Create trigger**
@@ -133,26 +147,60 @@ curl https://xxxxx.execute-api.us-east-1.amazonaws.com/prod/health
    - **Name**: PII Redaction on Ticket Create
    - **Conditions** (Meet ALL):
      - Ticket: Is Created
-     - Tags: Does not contain `pii-redacted`
+     - Tags: Does not contain `pii-redaction-in-progress`
    - **Actions**:
      - Notify webhook: PII Redaction Gateway
      - JSON body:
        ```json
        {
+         "event_type": "ticket.created",
          "ticket": {
            "id": "{{ticket.id}}",
            "subject": "{{ticket.title}}",
            "description": "{{ticket.description}}",
            "status": "{{ticket.status}}",
-           "tags": "{{ticket.tags}}"
+           "tags": "{{ticket.tags}}",
+           "updater_id": "{{current_user.id}}"
          }
        }
        ```
 4. Click **Create trigger**
 
-5. **(Optional)** Create a second trigger for **Ticket Updated** with the same webhook but condition "Ticket: Is Updated".
+### Trigger 2: Ticket Updated
 
-## Step 9: Test with a Sample Ticket
+1. Click **Create trigger** again
+2. Configure:
+   - **Name**: PII Redaction on Ticket Update
+   - **Conditions** (Meet ALL):
+     - Ticket: Is Updated
+     - Tags: Does not contain `pii-redaction-in-progress`
+   - **Actions**:
+     - Notify webhook: PII Redaction Gateway
+     - JSON body:
+       ```json
+       {
+         "event_type": "ticket.updated",
+         "ticket": {
+           "id": "{{ticket.id}}",
+           "subject": "{{ticket.title}}",
+           "description": "{{ticket.description}}",
+           "status": "{{ticket.status}}",
+           "tags": "{{ticket.tags}}",
+           "updater_id": "{{current_user.id}}",
+           "latest_comment": {
+             "id": "{{ticket.latest_comment.id}}",
+             "body": "{{ticket.latest_comment.value}}",
+             "author_id": "{{ticket.latest_comment.author.id}}",
+             "public": "{{ticket.latest_comment.is_public}}"
+           }
+         }
+       }
+       ```
+3. Click **Create trigger**
+
+> **How it works**: New tickets get a full scan (all fields + comments). Updates on already-redacted tickets get an incremental scan (only the latest comment). The bot's own updates are automatically skipped via the `updater_id` check.
+
+## Step 10: Test with a Sample Ticket
 
 1. Create a new Zendesk ticket with test PII:
    ```
@@ -172,7 +220,7 @@ curl https://xxxxx.execute-api.us-east-1.amazonaws.com/prod/health
    aws s3 ls s3://your-audit-bucket/audit/ --recursive
    ```
 
-## Step 10: Monitor
+## Step 11: Monitor
 
 ### CloudWatch Dashboard
 
