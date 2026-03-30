@@ -35,6 +35,7 @@ class Config(BaseSettings):
     # Redaction Configuration
     redaction_style: Literal["bracket", "mask"] = "bracket"
     enabled_pii_types: str = "SSN,CREDIT_CARD,EMAIL,PHONE,PASSWORD,PHI,ADDRESS,NAME,DATE_OF_BIRTH"
+    redact_on: Literal["all", "create", "update"] = "all"
 
     # AWS / Audit
     audit_s3_bucket: str = "pii-redaction-audit-bucket"

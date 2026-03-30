@@ -44,7 +44,7 @@ graph LR
 - **Audit Trail**: JSON logs to S3, partitioned by date, with lifecycle policies — no PII stored
 - **AWS Serverless**: Lambda + API Gateway + S3 + Secrets Manager + CloudWatch
 - **Infrastructure as Code**: Full Terraform configuration with modular `.tf` files
-- **Configurable**: Redaction style (bracket/mask), PII types, LLM provider, all via environment variables
+- **Configurable**: Redaction style (bracket/mask), PII types, LLM provider, event scope (`REDACT_ON=all|create|update`), all via environment variables
 
 ## Supported PII Types
 
@@ -93,9 +93,11 @@ All configuration is via environment variables (or `.env` file for local develop
 | `ZENDESK_SUBDOMAIN` | — | Your Zendesk subdomain |
 | `ZENDESK_EMAIL` | — | Zendesk agent email for API auth |
 | `ZENDESK_API_TOKEN` | — | Zendesk API token |
+| `ZENDESK_BOT_USER_ID` | — | Bot's Zendesk user ID (for loop prevention) |
 | `WEBHOOK_SECRET` | — | Shared secret for webhook authentication |
 | `REDACTION_STYLE` | `bracket` | `bracket` → `[REDACTED-SSN]`, `mask` → `****` |
 | `ENABLED_PII_TYPES` | all | Comma-separated PII types to detect |
+| `REDACT_ON` | `all` | When to redact: `all`, `create`, or `update` |
 | `AUDIT_S3_BUCKET` | — | S3 bucket for audit logs (set by Terraform) |
 | `LOG_LEVEL` | `INFO` | Logging level |
 

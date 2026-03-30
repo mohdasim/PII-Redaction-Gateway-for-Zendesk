@@ -1,6 +1,11 @@
 """Main Lambda handler for the PII Redaction Gateway webhook.
 
-Supports both ticket.created and ticket.updated events:
+Supports both ticket.created and ticket.updated events (configurable via REDACT_ON):
+- REDACT_ON=all (default): Process both creates and updates
+- REDACT_ON=create: Only process new tickets
+- REDACT_ON=update: Only process ticket updates
+
+Scan modes:
 - ticket.created: Full scan of subject, description, comments, custom fields
 - ticket.updated (already redacted): Incremental scan of new/changed content only
 
@@ -11,8 +16,8 @@ Recursive loop prevention uses two mechanisms:
 Flow:
 1. Authenticate the incoming request
 2. Parse the Zendesk webhook payload
-3. Check for bot self-update (prevents infinite loop)
-4. Check for concurrent processing (pii-redaction-in-progress tag)
+3. Check if event type is enabled (REDACT_ON setting)
+4. Check for bot self-update / concurrent processing
 5. Determine scan mode (full vs incremental)
 6. Initialize Zendesk client and add in-progress tag
 7. Fetch comments from Zendesk API (all or only new, based on scan mode)
@@ -71,7 +76,25 @@ def lambda_handler(event: dict, context) -> dict:
         logger.warning(f"Invalid payload: {e}", extra={"extra_fields": {"request_id": request_id}})
         return _response(400, {"error": "Invalid payload", "detail": str(e)})
 
-    # 3. Check for bot self-update (primary loop prevention)
+    # 3. Check if this event type is enabled
+    event_type = payload.event_type or _infer_event_type(ticket)
+    if not _is_event_enabled(event_type, config.redact_on):
+        logger.info(
+            "Event type not enabled, skipping",
+            extra={"extra_fields": {
+                "ticket_id": ticket.id,
+                "event_type": event_type,
+                "redact_on": config.redact_on,
+            }},
+        )
+        return _response(200, {
+            "status": "skipped",
+            "reason": "event_type_disabled",
+            "event_type": event_type,
+            "redact_on": config.redact_on,
+        })
+
+    # 4(a). Check for bot self-update (primary loop prevention)
     if _is_bot_update(ticket, config):
         logger.info(
             "Skipping bot's own update",
@@ -225,6 +248,36 @@ def _process_ticket(ticket, payload, zendesk, config, scan_mode, request_id, sta
         "total_redactions": total_redactions,
         "processing_time_ms": processing_time_ms,
     })
+
+
+def _infer_event_type(ticket) -> str:
+    """Infer event type when not explicitly provided in the payload.
+
+    If the ticket has the pii-redacted tag, it was previously processed,
+    so this is likely an update. Otherwise treat it as a create.
+    """
+    if TAG_REDACTED in ticket.tags:
+        return "ticket.updated"
+    return "ticket.created"
+
+
+def _is_event_enabled(event_type: str, redact_on: str) -> bool:
+    """Check if the given event type is enabled by the redact_on setting.
+
+    Args:
+        event_type: "ticket.created", "ticket.updated", or "unknown".
+        redact_on: "all", "create", or "update".
+
+    Returns:
+        True if the event should be processed.
+    """
+    if redact_on == "all":
+        return True
+    if redact_on == "create" and event_type in ("ticket.created", "unknown"):
+        return True
+    if redact_on == "update" and event_type == "ticket.updated":
+        return True
+    return False
 
 
 def _is_bot_update(ticket, config) -> bool:

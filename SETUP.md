@@ -48,9 +48,17 @@ environment  = "prod"
 llm_provider = "claude"
 llm_enabled  = true
 
+# When to run redaction: "all" (create + update), "create", or "update"
+redact_on = "all"
+
 # Optional: email for CloudWatch alarm notifications
 alarm_email = "your-team@company.com"
 ```
+
+> **REDACT_ON options:**
+> - `all` (default) — Redact on both ticket creation and updates
+> - `create` — Only redact when new tickets are created
+> - `update` — Only redact when existing tickets are updated (e.g., new comments)
 
 ## Step 4: Deploy Infrastructure
 

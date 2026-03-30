@@ -345,6 +345,114 @@ class TestWebhookHandler:
         assert body["status"] == "skipped"
         assert body["reason"] == "bot_self_update"
 
+    def test_redact_on_create_skips_update(self, api_gateway_event, mock_lambda_context, mock_s3):
+        """REDACT_ON=create skips ticket.updated events."""
+        from src.handlers.webhook_handler import lambda_handler
+
+        event = api_gateway_event(
+            body={
+                "event_type": "ticket.updated",
+                "ticket": {
+                    "id": 1100,
+                    "subject": "Help",
+                    "description": "SSN 123-45-6789",
+                    "tags": ["pii-redacted"],
+                    "updater_id": 12345,
+                },
+            },
+            headers={"X-API-Key": "test-secret-key"},
+        )
+
+        with patch("src.handlers.webhook_handler.get_config") as mock_cfg:
+            cfg = mock_cfg.return_value
+            cfg.webhook_secret.get_secret_value.return_value = "test-secret-key"
+            cfg.redact_on = "create"
+            cfg.zendesk_bot_user_id = 99999
+            response = lambda_handler(event, mock_lambda_context)
+
+        body = json.loads(response["body"])
+        assert body["status"] == "skipped"
+        assert body["reason"] == "event_type_disabled"
+
+    def test_redact_on_update_skips_create(self, api_gateway_event, mock_lambda_context, mock_s3):
+        """REDACT_ON=update skips ticket.created events."""
+        from src.handlers.webhook_handler import lambda_handler
+
+        event = api_gateway_event(
+            body={
+                "event_type": "ticket.created",
+                "ticket": {
+                    "id": 1200,
+                    "subject": "Help",
+                    "description": "SSN 123-45-6789",
+                    "tags": [],
+                },
+            },
+            headers={"X-API-Key": "test-secret-key"},
+        )
+
+        with patch("src.handlers.webhook_handler.get_config") as mock_cfg:
+            cfg = mock_cfg.return_value
+            cfg.webhook_secret.get_secret_value.return_value = "test-secret-key"
+            cfg.redact_on = "update"
+            cfg.zendesk_bot_user_id = 99999
+            response = lambda_handler(event, mock_lambda_context)
+
+        body = json.loads(response["body"])
+        assert body["status"] == "skipped"
+        assert body["reason"] == "event_type_disabled"
+
+    def test_redact_on_all_processes_both(self, api_gateway_event, mock_lambda_context, mock_s3):
+        """REDACT_ON=all processes both create and update events."""
+        from src.handlers.webhook_handler import lambda_handler
+
+        for event_type in ("ticket.created", "ticket.updated"):
+            tags = ["pii-redacted"] if event_type == "ticket.updated" else []
+            event = api_gateway_event(
+                body={
+                    "event_type": event_type,
+                    "ticket": {
+                        "id": 1300,
+                        "subject": "Help",
+                        "description": "SSN 123-45-6789",
+                        "tags": tags,
+                        "updater_id": 12345,
+                    },
+                },
+                headers={"X-API-Key": "test-secret-key"},
+            )
+
+            with patch("src.handlers.webhook_handler.ZendeskClient") as mock_zd_cls:
+                self._mock_zendesk(mock_zd_cls)
+                response = lambda_handler(event, mock_lambda_context)
+
+            body = json.loads(response["body"])
+            assert body["status"] == "processed", f"Failed for {event_type}"
+
+    def test_redact_on_create_allows_create(self, api_gateway_event, mock_lambda_context, mock_s3):
+        """REDACT_ON=create processes ticket.created events."""
+        from src.handlers.webhook_handler import lambda_handler
+
+        event = api_gateway_event(
+            body={
+                "event_type": "ticket.created",
+                "ticket": {
+                    "id": 1400,
+                    "subject": "Help",
+                    "description": "SSN 123-45-6789",
+                    "tags": [],
+                },
+            },
+            headers={"X-API-Key": "test-secret-key"},
+        )
+
+        with patch("src.handlers.webhook_handler.ZendeskClient") as mock_zd_cls:
+            self._mock_zendesk(mock_zd_cls)
+            response = lambda_handler(event, mock_lambda_context)
+
+        body = json.loads(response["body"])
+        assert body["status"] == "processed"
+
     def test_response_has_security_headers(self, api_gateway_event, mock_lambda_context, mock_s3):
         """All responses include security headers."""
         from src.handlers.webhook_handler import lambda_handler

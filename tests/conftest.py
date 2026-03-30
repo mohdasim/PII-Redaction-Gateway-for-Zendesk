@@ -21,6 +21,7 @@ os.environ.setdefault("LOG_LEVEL", "DEBUG")
 os.environ.setdefault("REDACTION_STYLE", "bracket")
 os.environ.setdefault("ENABLED_PII_TYPES", "SSN,CREDIT_CARD,EMAIL,PHONE,PASSWORD,PHI,ADDRESS,NAME,DATE_OF_BIRTH")
 os.environ.setdefault("ZENDESK_BOT_USER_ID", "99999")
+os.environ.setdefault("REDACT_ON", "all")
 
 from src.utils.config import Config
 
