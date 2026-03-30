@@ -1,0 +1,29 @@
+# =============================================================================
+# Terraform Variables — Copy to terraform.tfvars and customize
+# =============================================================================
+
+aws_region   = "us-east-1"
+environment  = "dev"
+project_name = "pii-redaction-gateway"
+
+# Logging
+log_level = "INFO"
+
+# LLM Configuration
+llm_provider = "claude"
+llm_enabled  = true
+
+# Redaction
+redaction_style   = "bracket"
+enabled_pii_types = "SSN,CREDIT_CARD,EMAIL,PHONE,PASSWORD,PHI,ADDRESS,NAME,DATE_OF_BIRTH"
+
+# Lambda
+lambda_memory_size = 512
+lambda_timeout     = 30
+
+# Audit log retention
+audit_retention_days          = 90
+audit_glacier_transition_days = 30
+
+# Alarms (leave empty to skip SNS alarm notifications)
+alarm_email = ""
