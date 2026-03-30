@@ -1,0 +1,99 @@
+{
+  "ticket_with_ssn": {
+    "ticket": {
+      "id": 1001,
+      "subject": "Need help with my account",
+      "description": "Hi, my SSN is 123-45-6789 and I need to update my records. Please help.",
+      "status": "new",
+      "tags": [],
+      "custom_fields": [],
+      "comments": []
+    }
+  },
+  "ticket_with_credit_card": {
+    "ticket": {
+      "id": 1002,
+      "subject": "Billing issue",
+      "description": "I was charged twice on my card 4111-1111-1111-1111. Please refund.",
+      "status": "new",
+      "tags": [],
+      "custom_fields": [],
+      "comments": [
+        {
+          "id": 5001,
+          "body": "My Amex card is 3714 496353 98431, can you check that?",
+          "author_id": 9001,
+          "public": true
+        }
+      ]
+    }
+  },
+  "ticket_with_mixed_pii": {
+    "ticket": {
+      "id": 1003,
+      "subject": "Account for john.doe@example.com",
+      "description": "Hello, I'm John Doe. My email is john.doe@example.com and my phone is (555) 123-4567. I live at 123 Main Street, Anytown. My SSN is 456-78-9012.",
+      "status": "new",
+      "tags": [],
+      "custom_fields": [],
+      "comments": []
+    }
+  },
+  "ticket_with_phi": {
+    "ticket": {
+      "id": 1004,
+      "subject": "Medical records request",
+      "description": "Patient has MRN: ABC12345. DOB: 03/15/1985. Diagnosis: E11.65 (Type 2 diabetes with hyperglycemia). Currently on Metformin 500mg.",
+      "status": "new",
+      "tags": [],
+      "custom_fields": [],
+      "comments": []
+    }
+  },
+  "ticket_clean": {
+    "ticket": {
+      "id": 1005,
+      "subject": "General question about pricing",
+      "description": "Hi there, I'd like to know more about your enterprise pricing plans. Can you send me a brochure? Thanks!",
+      "status": "new",
+      "tags": [],
+      "custom_fields": [],
+      "comments": []
+    }
+  },
+  "ticket_with_password": {
+    "ticket": {
+      "id": 1006,
+      "subject": "Login help",
+      "description": "I can't log in. My username is jdoe and my password is SuperSecret123! and my API key is sk-1234567890abcdef.",
+      "status": "new",
+      "tags": [],
+      "custom_fields": [],
+      "comments": []
+    }
+  },
+  "ticket_already_redacted": {
+    "ticket": {
+      "id": 1007,
+      "subject": "Previously processed ticket",
+      "description": "This ticket was already handled.",
+      "status": "open",
+      "tags": ["pii-redacted"],
+      "custom_fields": [],
+      "comments": []
+    }
+  },
+  "ticket_with_address": {
+    "ticket": {
+      "id": 1008,
+      "subject": "Shipping address update",
+      "description": "Please update my shipping address to 456 Oak Avenue, Suite 200. My zip code is 90210.",
+      "status": "new",
+      "tags": [],
+      "custom_fields": [
+        {"id": 360001, "value": "789 Elm Drive, Los Angeles, CA 90001"}
+      ],
+      "comments": []
+    }
+  }
+}
