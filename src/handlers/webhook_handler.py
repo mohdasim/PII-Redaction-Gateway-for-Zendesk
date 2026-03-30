@@ -4,11 +4,13 @@ Flow:
 1. Authenticate the incoming request
 2. Parse the Zendesk webhook payload
 3. Check for recursive processing (skip if already redacted)
-4. Extract text fields to scan
-5. Run the two-layer PII detection and redaction pipeline
-6. Update the Zendesk ticket with redacted content
-7. Write audit log to S3
-8. Return success response
+4. Initialize Zendesk client
+5. Fetch ALL comments for the ticket from Zendesk API
+6. Extract text fields to scan (subject, description, all comments, custom fields)
+7. Run the two-layer PII detection and redaction pipeline on every field
+8. Update Zendesk: redact subject/description + call Redaction API for each comment
+9. Write audit log to S3
+10. Return success response
 """
 
 from __future__ import annotations
@@ -71,12 +73,49 @@ def lambda_handler(event: dict, context) -> dict:
         )
         return _response(200, {"status": "skipped", "reason": "already_redacted"})
 
-    # 4. Extract text fields to scan
+    # 4. Initialize Zendesk client (needed for fetching comments)
+    zendesk = ZendeskClient(
+        subdomain=config.zendesk_subdomain,
+        email=config.zendesk_email,
+        api_token=config.zendesk_api_token.get_secret_value(),
+    )
+
+    # 5. Fetch ALL comments for this ticket from Zendesk API
+    api_comments = []
+    try:
+        api_comments = zendesk.fetch_ticket_comments(ticket.id)
+        logger.info(
+            "Fetched comments from Zendesk API",
+            extra={"extra_fields": {"ticket_id": ticket.id, "count": len(api_comments)}},
+        )
+    except Exception as e:
+        logger.warning(
+            f"Failed to fetch comments from Zendesk API, falling back to webhook payload: {e}",
+            extra={"extra_fields": {"ticket_id": ticket.id}},
+        )
+
+    # 6. Extract text fields to scan (ticket fields + all fetched comments)
     fields_to_scan = _extract_scannable_fields(ticket)
+
+    # Build a mapping of comment field keys -> their Zendesk comment IDs + original text
+    # so we can call the Redaction API with the exact PII substrings later
+    comment_field_map: dict[str, dict] = {}
+
+    for i, comment in enumerate(api_comments):
+        body = comment.get("body", "")
+        comment_id = comment.get("id")
+        if body and body.strip() and comment_id:
+            field_key = f"api_comment_{comment_id}"
+            fields_to_scan[field_key] = body
+            comment_field_map[field_key] = {
+                "comment_id": comment_id,
+                "original_text": body,
+            }
+
     if not fields_to_scan:
         return _response(200, {"status": "skipped", "reason": "no_text_fields"})
 
-    # 5. Detect and redact PII
+    # 7. Detect and redact PII in all fields
     pii_detector = PIIDetector(config)
     results = {}
     total_redactions = 0
@@ -86,15 +125,9 @@ def lambda_handler(event: dict, context) -> dict:
         results[field_name] = result
         total_redactions += result.redaction_count
 
-    # 6. Update Zendesk if PII was found
+    # 8. Update Zendesk if PII was found
     if total_redactions > 0:
         try:
-            zendesk = ZendeskClient(
-                subdomain=config.zendesk_subdomain,
-                email=config.zendesk_email,
-                api_token=config.zendesk_api_token.get_secret_value(),
-            )
-
             redacted_subject = (
                 results["subject"].redacted_text
                 if "subject" in results and results["subject"].redaction_count > 0
@@ -106,10 +139,29 @@ def lambda_handler(event: dict, context) -> dict:
                 else None
             )
 
+            # Build comment redaction list: extract original PII substrings
+            # using entity offsets against the original comment text
+            comment_redactions = []
+            for field_key, meta in comment_field_map.items():
+                if field_key in results and results[field_key].redaction_count > 0:
+                    original_text = meta["original_text"]
+                    redact_strings = [
+                        entity.extract_original(original_text)
+                        for entity in results[field_key].entities_found
+                    ]
+                    # Filter out empty strings from out-of-range offsets
+                    redact_strings = [s for s in redact_strings if s]
+                    if redact_strings:
+                        comment_redactions.append({
+                            "comment_id": meta["comment_id"],
+                            "redact_strings": redact_strings,
+                        })
+
             zendesk.apply_redactions(
                 ticket_id=ticket.id,
                 redacted_subject=redacted_subject,
                 redacted_description=redacted_description,
+                comment_redactions=comment_redactions,
                 total_redactions=total_redactions,
             )
         except Exception as e:
@@ -118,7 +170,7 @@ def lambda_handler(event: dict, context) -> dict:
                 extra={"extra_fields": {"ticket_id": ticket.id}},
             )
 
-    # 7. Write audit log to S3
+    # 9. Write audit log to S3
     processing_time_ms = round((time.time() - start_time) * 1000, 1)
     _write_audit_log(
         ticket_id=ticket.id,
@@ -129,7 +181,7 @@ def lambda_handler(event: dict, context) -> dict:
         config=config,
     )
 
-    # 8. Return response
+    # 10. Return response
     logger.info(
         "Processing complete",
         extra={"extra_fields": {

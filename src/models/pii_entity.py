@@ -46,6 +46,19 @@ class PIIEntity:
             ),
         )
 
+    def extract_original(self, text: str) -> str:
+        """Extract the original PII substring from source text using offsets.
+
+        Args:
+            text: The original (un-redacted) text this entity was detected in.
+
+        Returns:
+            The PII substring, or empty string if offsets are out of range.
+        """
+        if 0 <= self.start < self.end <= len(text):
+            return text[self.start:self.end]
+        return ""
+
     def to_audit_dict(self) -> dict:
         """Return audit-safe representation (no actual PII text)."""
         return {
