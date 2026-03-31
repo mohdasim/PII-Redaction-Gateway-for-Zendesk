@@ -32,7 +32,6 @@ class ZendeskTicket(BaseModel):
     custom_fields: list[dict[str, Any]] = []
     comments: list[ZendeskComment] = []
     latest_comment: ZendeskComment | None = None
-    updater_id: int | None = None
 
 
 class ZendeskWebhookPayload(BaseModel):
@@ -48,16 +47,13 @@ class ZendeskWebhookPayload(BaseModel):
 
     ticket: ZendeskTicket | None = None
 
-    # Event metadata — set by the Zendesk trigger JSON body
-    event_type: str | None = None
-
     # Some webhook configs send fields at root level
     id: int | None = None
     subject: str | None = None
     description: str | None = None
+    status: str | None = None
     tags: list[str] | None = None
     latest_comment: ZendeskComment | None = None
-    updater_id: int | None = None
 
     def get_ticket(self) -> ZendeskTicket:
         """Extract the ticket from the payload, handling different shapes."""
@@ -69,7 +65,7 @@ class ZendeskWebhookPayload(BaseModel):
             id=self.id or 0,
             subject=self.subject or "",
             description=self.description or "",
+            status=self.status or "",
             tags=self.tags or [],
             latest_comment=self.latest_comment,
-            updater_id=self.updater_id,
         )

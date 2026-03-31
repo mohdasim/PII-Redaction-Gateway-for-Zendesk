@@ -48,17 +48,9 @@ environment  = "prod"
 llm_provider = "claude"
 llm_enabled  = true
 
-# When to run redaction: "all" (create + update), "create", or "update"
-redact_on = "all"
-
 # Optional: email for CloudWatch alarm notifications
 alarm_email = "your-team@company.com"
 ```
-
-> **REDACT_ON options:**
-> - `all` (default) — Redact on both ticket creation and updates
-> - `create` — Only redact when new tickets are created
-> - `update` — Only redact when existing tickets are updated (e.g., new comments)
 
 ## Step 4: Deploy Infrastructure
 
@@ -133,82 +125,36 @@ curl https://xxxxx.execute-api.us-east-1.amazonaws.com/prod/health
      - **Value**: The webhook secret you generated in Step 5
 4. Click **Create webhook**
 
-## Step 8: Find Your Bot User ID
+## Step 8: Create Zendesk Trigger
 
-The gateway uses the bot's Zendesk user ID to prevent infinite webhook loops (when the bot updates a ticket, the webhook fires again — the bot ID check skips its own updates).
-
-1. In Zendesk Admin Center, go to **People** > search for the API bot user
-2. Open the user profile — the **user ID** is in the URL: `https://yourcompany.zendesk.com/agent/users/{USER_ID}`
-3. Add this to your Secrets Manager or Lambda environment variables as `ZENDESK_BOT_USER_ID`
-
-> **If you skip this step**, the gateway falls back to detecting its own internal notes via pattern matching, which is less reliable.
-
-## Step 9: Create Zendesk Triggers
-
-You need **two triggers** — one for ticket creation, one for ticket updates.
-
-### Trigger 1: Ticket Created
+Create a single trigger that fires when a ticket is solved.
 
 1. In Zendesk Admin Center, go to **Objects and rules** > **Business rules** > **Triggers**
 2. Click **Create trigger**
 3. Configure:
-   - **Name**: PII Redaction on Ticket Create
+   - **Name**: PII Redaction on Ticket Solved
    - **Conditions** (Meet ALL):
-     - Ticket: Is Created
-     - Tags: Does not contain `pii-redaction-in-progress`
+     - Status: Changed to Solved
+     - Tags: Does not contain `pii-redacted`
    - **Actions**:
      - Notify webhook: PII Redaction Gateway
      - JSON body:
        ```json
        {
-         "event_type": "ticket.created",
          "ticket": {
            "id": "{{ticket.id}}",
            "subject": "{{ticket.title}}",
            "description": "{{ticket.description}}",
            "status": "{{ticket.status}}",
-           "tags": "{{ticket.tags}}",
-           "updater_id": "{{current_user.id}}"
+           "tags": "{{ticket.tags}}"
          }
        }
        ```
 4. Click **Create trigger**
 
-### Trigger 2: Ticket Updated
+> **How it works**: When a ticket is solved, the gateway fetches all comments, scans every text field for PII, redacts via the Zendesk API, and adds the `pii-redacted` tag. If the ticket is re-opened and solved again, the tag prevents re-processing.
 
-1. Click **Create trigger** again
-2. Configure:
-   - **Name**: PII Redaction on Ticket Update
-   - **Conditions** (Meet ALL):
-     - Ticket: Is Updated
-     - Tags: Does not contain `pii-redaction-in-progress`
-   - **Actions**:
-     - Notify webhook: PII Redaction Gateway
-     - JSON body:
-       ```json
-       {
-         "event_type": "ticket.updated",
-         "ticket": {
-           "id": "{{ticket.id}}",
-           "subject": "{{ticket.title}}",
-           "description": "{{ticket.description}}",
-           "status": "{{ticket.status}}",
-           "tags": "{{ticket.tags}}",
-           "updater_id": "{{current_user.id}}",
-           "latest_comment": {
-             "id": "{{ticket.latest_comment.id}}",
-             "body": "{{ticket.latest_comment.value}}",
-             "author_id": "{{ticket.latest_comment.author.id}}",
-             "public": "{{ticket.latest_comment.is_public}}"
-           }
-         }
-       }
-       ```
-3. Click **Create trigger**
-
-> **How it works**: New tickets get a full scan (all fields + comments). Updates on already-redacted tickets get an incremental scan (only the latest comment). The bot's own updates are automatically skipped via the `updater_id` check.
-
-## Step 10: Test with a Sample Ticket
+## Step 9: Test with a Sample Ticket
 
 1. Create a new Zendesk ticket with test PII:
    ```
@@ -217,18 +163,20 @@ You need **two triggers** — one for ticket creation, one for ticket updates.
    Card number: 4532-0150-0000-1234.
    ```
 
-2. Wait 5-10 seconds for processing
+2. **Solve the ticket** (change status to Solved)
 
-3. Check the ticket — you should see:
+3. Wait 5-10 seconds for processing
+
+4. Check the ticket — you should see:
    - An internal note from the bot with redacted content
    - The tag `pii-redacted` added to the ticket
 
-4. Check the audit trail:
+5. Check the audit trail:
    ```bash
    aws s3 ls s3://your-audit-bucket/audit/ --recursive
    ```
 
-## Step 11: Monitor
+## Step 10: Monitor
 
 ### CloudWatch Dashboard
 

@@ -1,31 +1,20 @@
 """Main Lambda handler for the PII Redaction Gateway webhook.
 
-Supports both ticket.created and ticket.updated events (configurable via REDACT_ON):
-- REDACT_ON=all (default): Process both creates and updates
-- REDACT_ON=create: Only process new tickets
-- REDACT_ON=update: Only process ticket updates
-
-Scan modes:
-- ticket.created: Full scan of subject, description, comments, custom fields
-- ticket.updated (already redacted): Incremental scan of new/changed content only
-
-Recursive loop prevention uses two mechanisms:
-1. Bot user ID check — skip if the update was made by our own bot
-2. In-progress tag — skip if concurrent processing is already happening
+Runs PII redaction when a Zendesk ticket is solved. Uses simple tag-based
+loop prevention: tickets already tagged "pii-redacted" are skipped.
 
 Flow:
 1. Authenticate the incoming request
 2. Parse the Zendesk webhook payload
-3. Check if event type is enabled (REDACT_ON setting)
-4. Check for bot self-update / concurrent processing
-5. Determine scan mode (full vs incremental)
-6. Initialize Zendesk client and add in-progress tag
-7. Fetch comments from Zendesk API (all or only new, based on scan mode)
-8. Extract text fields to scan based on scan mode
-9. Run the two-layer PII detection and redaction pipeline
-10. Update Zendesk: redact content + manage tags
-11. Write audit log to S3
-12. Return success response
+3. Check if ticket status is "solved" — skip if not
+4. Check if "pii-redacted" tag is present — skip if already processed
+5. Initialize Zendesk client
+6. Fetch ALL comments for the ticket from Zendesk API
+7. Extract text fields to scan (subject, description, all comments, custom fields)
+8. Run the two-layer PII detection and redaction pipeline
+9. Update Zendesk: redact content + add "pii-redacted" tag
+10. Write audit log to S3
+11. Return success response
 """
 
 from __future__ import annotations
@@ -45,9 +34,7 @@ from src.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Tags used for state management
 TAG_REDACTED = "pii-redacted"
-TAG_IN_PROGRESS = "pii-redaction-in-progress"
 
 
 def lambda_handler(event: dict, context) -> dict:
@@ -76,87 +63,35 @@ def lambda_handler(event: dict, context) -> dict:
         logger.warning(f"Invalid payload: {e}", extra={"extra_fields": {"request_id": request_id}})
         return _response(400, {"error": "Invalid payload", "detail": str(e)})
 
-    # 3. Check if this event type is enabled
-    event_type = payload.event_type or _infer_event_type(ticket)
-    if not _is_event_enabled(event_type, config.redact_on):
+    # 3. Check if ticket is solved
+    if ticket.status.lower() != "solved":
         logger.info(
-            "Event type not enabled, skipping",
-            extra={"extra_fields": {
-                "ticket_id": ticket.id,
-                "event_type": event_type,
-                "redact_on": config.redact_on,
-            }},
+            "Ticket not solved, skipping",
+            extra={"extra_fields": {"ticket_id": ticket.id, "status": ticket.status}},
         )
-        return _response(200, {
-            "status": "skipped",
-            "reason": "event_type_disabled",
-            "event_type": event_type,
-            "redact_on": config.redact_on,
-        })
+        return _response(200, {"status": "skipped", "reason": "not_solved", "ticket_status": ticket.status})
 
-    # 4(a). Check for bot self-update (primary loop prevention)
-    if _is_bot_update(ticket, config):
+    # 4. Tag-based loop prevention
+    if TAG_REDACTED in ticket.tags:
         logger.info(
-            "Skipping bot's own update",
-            extra={"extra_fields": {"ticket_id": ticket.id, "updater_id": ticket.updater_id}},
-        )
-        return _response(200, {"status": "skipped", "reason": "bot_self_update"})
-
-    # 4. Check for concurrent processing
-    if TAG_IN_PROGRESS in ticket.tags:
-        logger.info(
-            "Skipping — redaction already in progress",
+            "Ticket already redacted, skipping",
             extra={"extra_fields": {"ticket_id": ticket.id}},
         )
-        return _response(200, {"status": "skipped", "reason": "redaction_in_progress"})
-
-    # 5. Determine scan mode
-    already_redacted = TAG_REDACTED in ticket.tags
-    scan_mode = "incremental" if already_redacted else "full"
+        return _response(200, {"status": "skipped", "reason": "already_redacted"})
 
     logger.info(
-        "Processing ticket",
-        extra={"extra_fields": {
-            "ticket_id": ticket.id,
-            "scan_mode": scan_mode,
-            "event_type": payload.event_type or "unknown",
-        }},
+        "Processing solved ticket",
+        extra={"extra_fields": {"ticket_id": ticket.id}},
     )
 
-    # 6. Initialize Zendesk client and add in-progress tag
+    # 5. Initialize Zendesk client
     zendesk = ZendeskClient(
         subdomain=config.zendesk_subdomain,
         email=config.zendesk_email,
         api_token=config.zendesk_api_token.get_secret_value(),
     )
 
-    try:
-        zendesk.add_tags(ticket.id, [TAG_IN_PROGRESS])
-    except Exception as e:
-        logger.warning(
-            f"Failed to add in-progress tag: {e}",
-            extra={"extra_fields": {"ticket_id": ticket.id}},
-        )
-
-    try:
-        result = _process_ticket(ticket, payload, zendesk, config, scan_mode, request_id, start_time)
-    finally:
-        # Always remove in-progress tag, even on failure
-        try:
-            zendesk.remove_tags(ticket.id, [TAG_IN_PROGRESS])
-        except Exception as e:
-            logger.warning(
-                f"Failed to remove in-progress tag: {e}",
-                extra={"extra_fields": {"ticket_id": ticket.id}},
-            )
-
-    return result
-
-
-def _process_ticket(ticket, payload, zendesk, config, scan_mode, request_id, start_time) -> dict:
-    """Core processing logic — extracted so in-progress tag cleanup runs in finally."""
-
-    # 7. Fetch comments from Zendesk API
+    # 6. Fetch ALL comments for this ticket from Zendesk API
     api_comments = []
     try:
         api_comments = zendesk.fetch_ticket_comments(ticket.id)
@@ -170,15 +105,25 @@ def _process_ticket(ticket, payload, zendesk, config, scan_mode, request_id, sta
             extra={"extra_fields": {"ticket_id": ticket.id}},
         )
 
-    # 8. Extract text fields to scan based on scan mode
-    fields_to_scan, comment_field_map = _build_scan_fields(
-        ticket, api_comments, scan_mode,
-    )
+    # 7. Extract text fields to scan
+    fields_to_scan = _extract_scannable_fields(ticket)
+    comment_field_map: dict[str, dict] = {}
+
+    for comment in api_comments:
+        body = comment.get("body", "")
+        comment_id = comment.get("id")
+        if body and body.strip() and comment_id:
+            field_key = f"api_comment_{comment_id}"
+            fields_to_scan[field_key] = body
+            comment_field_map[field_key] = {
+                "comment_id": comment_id,
+                "original_text": body,
+            }
 
     if not fields_to_scan:
         return _response(200, {"status": "skipped", "reason": "no_text_fields"})
 
-    # 9. Detect and redact PII in all fields
+    # 8. Detect and redact PII in all fields
     pii_detector = PIIDetector(config)
     results = {}
     total_redactions = 0
@@ -188,7 +133,7 @@ def _process_ticket(ticket, payload, zendesk, config, scan_mode, request_id, sta
         results[field_name] = result
         total_redactions += result.redaction_count
 
-    # 10. Update Zendesk if PII was found
+    # 9. Update Zendesk if PII was found
     if total_redactions > 0:
         try:
             redacted_subject = (
@@ -202,7 +147,6 @@ def _process_ticket(ticket, payload, zendesk, config, scan_mode, request_id, sta
                 else None
             )
 
-            # Build comment redaction list
             comment_redactions = _build_comment_redactions(results, comment_field_map)
 
             zendesk.apply_redactions(
@@ -218,7 +162,7 @@ def _process_ticket(ticket, payload, zendesk, config, scan_mode, request_id, sta
                 extra={"extra_fields": {"ticket_id": ticket.id}},
             )
 
-    # 11. Write audit log to S3
+    # 10. Write audit log to S3
     processing_time_ms = round((time.time() - start_time) * 1000, 1)
     _write_audit_log(
         ticket_id=ticket.id,
@@ -226,16 +170,14 @@ def _process_ticket(ticket, payload, zendesk, config, scan_mode, request_id, sta
         request_id=request_id,
         llm_provider=pii_detector.llm_provider_name,
         processing_time_ms=processing_time_ms,
-        scan_mode=scan_mode,
         config=config,
     )
 
-    # 12. Return response
+    # 11. Return response
     logger.info(
         "Processing complete",
         extra={"extra_fields": {
             "ticket_id": ticket.id,
-            "scan_mode": scan_mode,
             "total_redactions": total_redactions,
             "processing_ms": processing_time_ms,
         }},
@@ -244,148 +186,13 @@ def _process_ticket(ticket, payload, zendesk, config, scan_mode, request_id, sta
     return _response(200, {
         "status": "processed",
         "ticket_id": ticket.id,
-        "scan_mode": scan_mode,
         "total_redactions": total_redactions,
         "processing_time_ms": processing_time_ms,
     })
 
 
-def _infer_event_type(ticket) -> str:
-    """Infer event type when not explicitly provided in the payload.
-
-    If the ticket has the pii-redacted tag, it was previously processed,
-    so this is likely an update. Otherwise treat it as a create.
-    """
-    if TAG_REDACTED in ticket.tags:
-        return "ticket.updated"
-    return "ticket.created"
-
-
-def _is_event_enabled(event_type: str, redact_on: str) -> bool:
-    """Check if the given event type is enabled by the redact_on setting.
-
-    Args:
-        event_type: "ticket.created", "ticket.updated", or "unknown".
-        redact_on: "all", "create", or "update".
-
-    Returns:
-        True if the event should be processed.
-    """
-    if redact_on == "all":
-        return True
-    if redact_on == "create" and event_type in ("ticket.created", "unknown"):
-        return True
-    if redact_on == "update" and event_type == "ticket.updated":
-        return True
-    return False
-
-
-def _is_bot_update(ticket, config) -> bool:
-    """Check if this webhook was triggered by the bot's own update.
-
-    Uses the configured bot user ID if available, otherwise checks
-    if the latest comment was authored by the same user as the updater.
-    """
-    bot_user_id = config.zendesk_bot_user_id
-    if bot_user_id is not None and ticket.updater_id is not None:
-        if ticket.updater_id == bot_user_id:
-            return True
-
-    # Fallback: if updater_id matches latest_comment author_id and that
-    # comment is an internal note, it's likely the bot's own update
-    if (
-        ticket.updater_id is not None
-        and ticket.latest_comment is not None
-        and ticket.latest_comment.author_id == ticket.updater_id
-        and not ticket.latest_comment.public
-        and ticket.latest_comment.body
-        and "[PII Redaction Gateway]" in ticket.latest_comment.body
-    ):
-        return True
-
-    return False
-
-
-def _build_scan_fields(ticket, api_comments, scan_mode):
-    """Build the dict of fields to scan and comment metadata map.
-
-    Args:
-        ticket: Parsed ZendeskTicket.
-        api_comments: Comments fetched from Zendesk API.
-        scan_mode: "full" or "incremental".
-
-    Returns:
-        Tuple of (fields_to_scan dict, comment_field_map dict).
-    """
-    fields_to_scan: dict[str, str] = {}
-    comment_field_map: dict[str, dict] = {}
-
-    if scan_mode == "full":
-        # Full scan: subject, description, all comments, custom fields
-        fields_to_scan = _extract_scannable_fields(ticket)
-
-        for comment in api_comments:
-            body = comment.get("body", "")
-            comment_id = comment.get("id")
-            if body and body.strip() and comment_id:
-                field_key = f"api_comment_{comment_id}"
-                fields_to_scan[field_key] = body
-                comment_field_map[field_key] = {
-                    "comment_id": comment_id,
-                    "original_text": body,
-                }
-    else:
-        # Incremental scan: only the latest comment (the new content)
-        # Also scan subject/description in case they were edited
-        if ticket.subject and ticket.subject.strip():
-            fields_to_scan["subject"] = ticket.subject
-        if ticket.description and ticket.description.strip():
-            fields_to_scan["description"] = ticket.description
-
-        # Scan latest comment from webhook payload
-        if ticket.latest_comment and ticket.latest_comment.body:
-            lc = ticket.latest_comment
-            # Skip if this is an internal note from the bot
-            if not (not lc.public and lc.body and "[PII Redaction Gateway]" in lc.body):
-                fields_to_scan["latest_comment"] = lc.body
-                if lc.id:
-                    comment_field_map["latest_comment"] = {
-                        "comment_id": lc.id,
-                        "original_text": lc.body,
-                    }
-
-        # Also check the most recent API comment (may be the new one)
-        if api_comments:
-            latest_api = api_comments[-1]
-            body = latest_api.get("body", "")
-            comment_id = latest_api.get("id")
-            if body and body.strip() and comment_id:
-                field_key = f"api_comment_{comment_id}"
-                # Don't duplicate if already scanned via latest_comment
-                if field_key not in fields_to_scan and "latest_comment" not in fields_to_scan:
-                    fields_to_scan[field_key] = body
-                    comment_field_map[field_key] = {
-                        "comment_id": comment_id,
-                        "original_text": body,
-                    }
-                elif field_key not in fields_to_scan:
-                    # Add API comment for redaction tracking even if we already
-                    # scanned it via latest_comment (for the comment_id mapping)
-                    if (
-                        "latest_comment" in comment_field_map
-                        and comment_field_map["latest_comment"].get("comment_id") != comment_id
-                    ):
-                        fields_to_scan[field_key] = body
-                        comment_field_map[field_key] = {
-                            "comment_id": comment_id,
-                            "original_text": body,
-                        }
-
-    return fields_to_scan, comment_field_map
-
-
 def _extract_scannable_fields(ticket) -> dict[str, str]:
-    """Extract all text fields from a ticket for full PII scanning."""
+    """Extract all text fields from a ticket for PII scanning."""
     fields = {}
 
     if ticket.subject and ticket.subject.strip():
@@ -393,16 +200,13 @@ def _extract_scannable_fields(ticket) -> dict[str, str]:
     if ticket.description and ticket.description.strip():
         fields["description"] = ticket.description
 
-    # Scan latest comment if present
     if ticket.latest_comment and ticket.latest_comment.body:
         fields["latest_comment"] = ticket.latest_comment.body
 
-    # Scan all comments from webhook payload
     for i, comment in enumerate(ticket.comments):
         if comment.body and comment.body.strip():
             fields[f"comment_{i}"] = comment.body
 
-    # Scan custom fields with string values
     for cf in ticket.custom_fields:
         value = cf.get("value", "")
         if isinstance(value, str) and value.strip():
@@ -437,21 +241,16 @@ def _write_audit_log(
     request_id: str,
     llm_provider: str,
     processing_time_ms: float,
-    scan_mode: str,
     config,
 ) -> None:
-    """Write audit log entry to S3.
-
-    The audit record contains ONLY metadata about what was redacted —
-    no actual PII values are stored.
-    """
+    """Write audit log entry to S3. No actual PII values are stored."""
     now = datetime.now(timezone.utc)
 
     audit_record = {
         "ticket_id": str(ticket_id),
         "timestamp": now.isoformat(),
         "request_id": request_id,
-        "scan_mode": scan_mode,
+        "trigger": "ticket_solved",
         "llm_provider_used": llm_provider,
         "processing_time_ms": processing_time_ms,
         "total_redactions": sum(r.redaction_count for r in results.values()),
@@ -465,7 +264,6 @@ def _write_audit_log(
                 **entity.to_audit_dict(),
             })
 
-    # Write to S3
     s3_key = (
         f"audit/{now.year}/{now.month:02d}/{now.day:02d}/"
         f"{ticket_id}_{now.strftime('%H%M%S')}_{request_id}.json"

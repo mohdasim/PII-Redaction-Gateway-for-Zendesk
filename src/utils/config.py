@@ -27,7 +27,6 @@ class Config(BaseSettings):
     zendesk_subdomain: str = ""
     zendesk_email: str = ""
     zendesk_api_token: SecretStr = SecretStr("")
-    zendesk_bot_user_id: int | None = None
 
     # Webhook Authentication
     webhook_secret: SecretStr = SecretStr("")
@@ -35,7 +34,6 @@ class Config(BaseSettings):
     # Redaction Configuration
     redaction_style: Literal["bracket", "mask"] = "bracket"
     enabled_pii_types: str = "SSN,CREDIT_CARD,EMAIL,PHONE,PASSWORD,PHI,ADDRESS,NAME,DATE_OF_BIRTH"
-    redact_on: Literal["all", "create", "update"] = "all"
 
     # AWS / Audit
     audit_s3_bucket: str = "pii-redaction-audit-bucket"
