@@ -127,12 +127,14 @@ curl https://xxxxx.execute-api.us-east-1.amazonaws.com/prod/health
 
 ## Step 8: Create Zendesk Trigger
 
+Create a single trigger that fires when a ticket is solved.
+
 1. In Zendesk Admin Center, go to **Objects and rules** > **Business rules** > **Triggers**
 2. Click **Create trigger**
 3. Configure:
-   - **Name**: PII Redaction on Ticket Create
+   - **Name**: PII Redaction on Ticket Solved
    - **Conditions** (Meet ALL):
-     - Ticket: Is Created
+     - Status: Changed to Solved
      - Tags: Does not contain `pii-redacted`
    - **Actions**:
      - Notify webhook: PII Redaction Gateway
@@ -150,7 +152,7 @@ curl https://xxxxx.execute-api.us-east-1.amazonaws.com/prod/health
        ```
 4. Click **Create trigger**
 
-5. **(Optional)** Create a second trigger for **Ticket Updated** with the same webhook but condition "Ticket: Is Updated".
+> **How it works**: When a ticket is solved, the gateway fetches all comments, scans every text field for PII, redacts via the Zendesk API, and adds the `pii-redacted` tag. If the ticket is re-opened and solved again, the tag prevents re-processing.
 
 ## Step 9: Test with a Sample Ticket
 
@@ -161,13 +163,15 @@ curl https://xxxxx.execute-api.us-east-1.amazonaws.com/prod/health
    Card number: 4532-0150-0000-1234.
    ```
 
-2. Wait 5-10 seconds for processing
+2. **Solve the ticket** (change status to Solved)
 
-3. Check the ticket — you should see:
+3. Wait 5-10 seconds for processing
+
+4. Check the ticket — you should see:
    - An internal note from the bot with redacted content
    - The tag `pii-redacted` added to the ticket
 
-4. Check the audit trail:
+5. Check the audit trail:
    ```bash
    aws s3 ls s3://your-audit-bucket/audit/ --recursive
    ```

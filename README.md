@@ -6,32 +6,37 @@ Automated middleware that sanitizes all incoming Zendesk ticket payloads for sen
 
 ```mermaid
 graph LR
-    A[Zendesk Ticket<br/>Created/Updated] -->|Webhook POST| B[API Gateway]
+    A[Zendesk Ticket<br/>Solved] -->|Webhook POST| B[API Gateway]
     B -->|/webhook| C[Lambda:<br/>webhook_handler]
     C --> D{Auth Valid?}
     D -->|No| E[401 Unauthorized]
-    D -->|Yes| F{Already<br/>Redacted?}
-    F -->|Yes| G[200 Skipped]
-    F -->|No| H[Parse Ticket<br/>Payload]
-    H --> I[Layer 1:<br/>Regex Detection]
-    I --> J[Layer 2:<br/>LLM Detection]
-    J --> K[Merge &<br/>Deduplicate]
-    K --> L[Apply Redaction]
-    L --> M{PII Found?}
-    M -->|No| N[200 No Action]
-    M -->|Yes| O[Update Zendesk<br/>Ticket + Tag]
-    O --> P[Write Audit Log<br/>to S3]
-    P --> Q[200 Processed]
-    C -.->|Logs| R[CloudWatch]
-    C -.->|Secrets| S[Secrets Manager]
+    D -->|Yes| F{Status =<br/>Solved?}
+    F -->|No| G[200 Skipped]
+    F -->|Yes| H{Already<br/>Redacted?}
+    H -->|Yes| G
+    H -->|No| I[Fetch All Comments<br/>from Zendesk API]
+    I --> J[Layer 1:<br/>Regex Detection]
+    J --> K[Layer 2:<br/>LLM Detection]
+    K --> L[Merge &<br/>Deduplicate]
+    L --> M[Apply Redaction]
+    M --> N{PII Found?}
+    N -->|No| O[200 No Action]
+    N -->|Yes| P[Redact Comments<br/>via Zendesk API]
+    P --> Q[Update Ticket +<br/>Add pii-redacted Tag]
+    Q --> R[Write Audit Log<br/>to S3]
+    R --> S[200 Processed]
+    C -.->|Logs| T[CloudWatch]
+    C -.->|Secrets| U[Secrets Manager]
 ```
 
 ## Features
 
+- **Redact on Ticket Solved**: PII redaction runs when a ticket is solved — all content (subject, description, comments) is scanned at once
 - **Two-Layer PII Detection**: Fast regex patterns (Layer 1) + contextual LLM analysis (Layer 2)
 - **Multi-LLM Support**: Claude (primary), OpenAI, and Gemini with automatic fallback
 - **8 PII Categories**: SSN, Credit Card (Luhn-validated), Email, Phone, Password/Credentials, PHI/Medical, Address, Names
-- **Recursive Loop Prevention**: Tickets tagged `pii-redacted` are automatically skipped
+- **Comment Redaction**: Fetches all ticket comments from Zendesk API and redacts PII via the Zendesk Redaction API
+- **Tag-Based Loop Prevention**: Tickets tagged `pii-redacted` are automatically skipped — simple, no bot ID config needed
 - **Audit Trail**: JSON logs to S3, partitioned by date, with lifecycle policies — no PII stored
 - **AWS Serverless**: Lambda + API Gateway + S3 + Secrets Manager + CloudWatch
 - **Infrastructure as Code**: Full Terraform configuration with modular `.tf` files

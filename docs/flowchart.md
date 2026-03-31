@@ -14,17 +14,23 @@ sequenceDiagram
     participant S3 as S3 Audit
     participant CW as CloudWatch
 
-    Z->>AG: POST /webhook (ticket payload)
+    Z->>AG: POST /webhook (ticket solved)
     AG->>L: Invoke Lambda
     L->>L: Verify authentication
     alt Auth failed
         L-->>AG: 401 Unauthorized
     end
     L->>L: Parse payload
+    L->>L: Check status = "solved"
+    alt Not solved
+        L-->>AG: 200 Skipped (not_solved)
+    end
     L->>L: Check "pii-redacted" tag
     alt Already redacted
-        L-->>AG: 200 Skipped
+        L-->>AG: 200 Skipped (already_redacted)
     end
+    L->>ZA: Fetch all ticket comments
+    ZA-->>L: Comments list
     L->>RD: Detect PII (regex patterns)
     RD-->>L: Regex entities
     L->>LD: Detect PII (LLM contextual)

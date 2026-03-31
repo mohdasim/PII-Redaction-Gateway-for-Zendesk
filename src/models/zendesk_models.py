@@ -51,6 +51,7 @@ class ZendeskWebhookPayload(BaseModel):
     id: int | None = None
     subject: str | None = None
     description: str | None = None
+    status: str | None = None
     tags: list[str] | None = None
     latest_comment: ZendeskComment | None = None
 
@@ -64,6 +65,7 @@ class ZendeskWebhookPayload(BaseModel):
             id=self.id or 0,
             subject=self.subject or "",
             description=self.description or "",
+            status=self.status or "",
             tags=self.tags or [],
             latest_comment=self.latest_comment,
         )
